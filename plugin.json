@@ -1,0 +1,12 @@
+{
+  "name": "side-chat",
+  "displayName": "Side Chat (/btw)",
+  "description": "Claude Code /btw style lightweight parallel side chat in the Auxiliary Pane with automatic context awareness, text-selection quoting, and one-click push to main agent.",
+  "version": "1.0.0",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open Side Chat (/btw) in the auxiliary pane",
+    "/btw summarize what the main agent is doing right now",
+    "Open the /btw side chat panel"
+  ]
+}

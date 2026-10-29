@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Side Chat (/btw)</title>
+  <!-- Injected by sidecar_sdk to provide window.sidecar and sync host theme-change CSS variables -->
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/katex.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/katex.min.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="header-left">
+        <span class="brand-icon" aria-hidden="true">⚡</span>
+        <h1 class="brand-title">Side Chat</h1>
+        <span class="brand-badge">/btw</span>
+      </div>
+      <div class="header-right">
+        <button id="context-toggle" class="header-btn" title="查看主会话上下文快照" aria-expanded="false" aria-controls="context-drawer">
+          <span class="status-dot status-waiting" id="context-dot" aria-hidden="true"></span>
+          <span id="context-label" class="context-label">感知主会话中...</span>
+        </button>
+        <button id="reset-btn" class="header-btn header-btn-icon" title="新会话 (清空当前旁路，重新感知主任务)" aria-label="新会话">
+          <svg class="icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+            <path d="M3 21v-5h5"/>
+          </svg>
+          <span class="btn-text">新会话</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Context Inspector Drawer (collapsible) -->
+    <section id="context-drawer" class="context-drawer hidden" aria-label="主会话上下文详情">
+      <div class="drawer-header">
+        <h2 class="drawer-title">
+          <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          主任务上下文快照
+        </h2>
+        <button id="ctx-drawer-close" class="drawer-close-btn" aria-label="收起详情">×</button>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-item">
+          <span class="item-label">初始目标</span>
+          <div id="ctx-goal" class="item-value">暂未读取到目标</div>
+        </div>
+        <div class="drawer-item">
+          <span class="item-label">活动工作区</span>
+          <div id="ctx-workspace" class="item-value">暂无活动工作区</div>
+        </div>
+        <div class="drawer-item">
+          <span class="item-label">最近进展</span>
+          <div id="ctx-steps" class="item-value">等待主会话产生步骤...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Content Area -->
+    <main id="main-view" class="main-view">
+      <!-- Empty State -->
+      <section id="empty-state" class="empty-state">
+        <div class="empty-hero">
+          <div class="hero-badge" aria-hidden="true">/btw</div>
+          <h2 class="empty-title">旁路随航助手</h2>
+          <p class="empty-desc">并行轻量旁路问答 · 自动感知主任务进度 · 支持主对话划词 Quote 追问 · 不污染主上下文</p>
+        </div>
+
+        <div class="quick-prompts-section">
+          <div class="quick-prompts-title">快捷旁路探索</div>
+          <div class="quick-chips">
+            <button class="prompt-chip" data-prompt="总结主任务当前进展与下一步">
+              <span class="chip-icon" aria-hidden="true">📌</span>
+              <span class="chip-text">总结主任务当前进展与下一步</span>
+            </button>
+            <button class="prompt-chip" data-prompt="分析刚才步骤中的潜在风险或边界条件">
+              <span class="chip-icon" aria-hidden="true">🔍</span>
+              <span class="chip-text">分析刚才步骤中的潜在风险或边界条件</span>
+            </button>
+            <button class="prompt-chip" data-prompt="帮我写一段针对当前功能的验证测试或示例片段">
+              <span class="chip-icon" aria-hidden="true">💡</span>
+              <span class="chip-text">帮我写一段验证测试或示例片段</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multi-Turn Messages Container -->
+      <section id="messages-container" class="messages-container hidden">
+        <div id="messages-list" class="messages-list"></div>
+
+        <!-- Active Generation Skeleton Loading Indicator -->
+        <div id="answer-loading" class="answer-loading hidden">
+          <div class="answer-loading-header">
+            <div class="skeleton-line skeleton-short"></div>
+            <button id="inline-stop-btn" class="inline-stop-btn" type="button" title="停止生成 (Esc)">
+              <svg class="icon" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true">
+                <rect x="5" y="5" width="14" height="14" rx="2"/>
+              </svg>
+              <span>停止输出</span>
+            </button>
+          </div>
+          <div class="skeleton-line"></div>
+          <div class="skeleton-line skeleton-medium"></div>
+        </div>
+
+        <!-- Thread-level Push Actions Panel -->
+        <div id="thread-push-actions" class="thread-push-actions hidden">
+          <div class="push-buttons-row">
+            <button id="push-direct-btn" class="push-btn push-btn-primary" title="将完整多轮旁路记录安全推入主会话">
+              <span class="btn-icon" aria-hidden="true">🚀</span>
+              <span>完整记录插入主任务</span>
+            </button>
+            <button id="push-note-toggle-btn" class="push-btn push-btn-secondary" title="附带给主 Agent 的额外指令后推入">
+              <span class="btn-icon" aria-hidden="true">✏️</span>
+              <span>附言后插入</span>
+            </button>
+          </div>
+
+          <!-- Inline Note Panel -->
+          <div id="push-note-panel" class="push-note-panel hidden">
+            <textarea id="push-note-input" placeholder="补充一句给主 Agent 的指令（如：请按上述多轮讨论方案实现）..." rows="2"></textarea>
+            <div class="push-note-footer">
+              <button id="push-note-submit-btn" class="push-btn push-btn-primary push-btn-sm">
+                确认推入主任务
+              </button>
+              <button id="push-note-cancel-btn" class="push-btn push-btn-ghost push-btn-sm">
+                取消
+              </button>
+            </div>
+          </div>
+
+          <!-- Push Status Feedback -->
+          <div id="push-status" class="push-status hidden" role="status">
+            <span class="push-status-icon" aria-hidden="true">✓</span>
+            <span id="push-status-text">已安全推入主会话消息队列</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Composer Footer -->
+    <footer class="composer-footer">
+      <!-- Quote Attachment Banner -->
+      <div id="quote-banner" class="quote-banner hidden">
+        <div class="quote-banner-header">
+          <span class="quote-banner-title">
+            <svg class="icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+            <span>已引用主对话选中文本</span>
+          </span>
+          <button id="quote-clear-btn" class="quote-clear-btn" title="移除引用" aria-label="移除引用">×</button>
+        </div>
+        <div id="quote-preview-text" class="quote-preview-text"></div>
+      </div>
+
+      <!-- Composer Box -->
+      <div class="composer-box">
+        <textarea id="question-input" placeholder="输入旁路问题 (Enter 发送, Shift+Enter 换行)..." rows="2"></textarea>
+        <div class="composer-toolbar">
+          <div class="toolbar-left">
+            <select id="model-select" class="model-select" aria-label="选择模型">
+              <optgroup label="⚡ Gemini Flash (极速推荐)">
+                <option value="MODEL_PLACEHOLDER_M320" selected>Gemini 3.8 Flash (Low)</option>
+                <option value="MODEL_PLACEHOLDER_M319">Gemini 3.8 Flash (Medium)</option>
+                <option value="MODEL_PLACEHOLDER_M318">Gemini 3.8 Flash (High)</option>
+              </optgroup>
+              <optgroup label="✨ Gemini 4 Argon">
+                <option value="MODEL_PLACEHOLDER_M419">Gemini 4 Argon (Low)</option>
+                <option value="MODEL_PLACEHOLDER_M418">Gemini 4 Argon (Medium)</option>
+                <option value="MODEL_PLACEHOLDER_M417">Gemini 4 Argon (High)</option>
+              </optgroup>
+              <optgroup label="🧠 Claude 5.5">
+                <option value="MODEL_PLACEHOLDER_M403">Claude Sonnet 5.5 (Low)</option>
+                <option value="MODEL_PLACEHOLDER_M404">Claude Sonnet 5.5 (Medium)</option>
+                <option value="MODEL_PLACEHOLDER_M405">Claude Sonnet 5.5 (High)</option>
+                <option value="MODEL_PLACEHOLDER_M400">Claude Opus 5.5 (Low)</option>
+                <option value="MODEL_PLACEHOLDER_M401">Claude Opus 5.5 (Medium)</option>
+                <option value="MODEL_PLACEHOLDER_M402">Claude Opus 5.5 (High)</option>
+              </optgroup>
+              <optgroup label="🌐 其他模型">
+                <option value="MODEL_OPENAI_GPT_OSS_120B_MEDIUM">GPT-OSS 120B (Medium)</option>
+              </optgroup>
+            </select>
+            <span id="composer-ctx-badge" class="composer-ctx-badge" title="上下文感知状态">
+              <span class="badge-dot" aria-hidden="true"></span>
+              <span class="badge-text">主会话已同步</span>
+            </span>
+          </div>
+          <div class="toolbar-right">
+            <button id="send-btn" class="send-btn" aria-label="发送问题" title="发送 (Enter)">
+              <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+            <button id="stop-btn" class="stop-btn hidden" aria-label="停止输出" title="停止输出 (Esc)">
+              <svg class="icon" viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true">
+                <rect x="5" y="5" width="14" height="14" rx="2.5"/>
+              </svg>
+              <span class="stop-btn-text">停止</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

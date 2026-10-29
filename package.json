@@ -1,0 +1,29 @@
+{
+  "name": "antigravity-side-chat",
+  "version": "1.0.0",
+  "description": "Lightweight parallel side chat plugin for Google Antigravity in the Auxiliary Pane, with context awareness, text-selection quoting, LaTeX KaTeX math rendering, and one-click push to main agent.",
+  "type": "module",
+  "scripts": {
+    "start": "node sidecars/panel/main.mjs",
+    "preview": "cd sidecars/panel && SIDE_CHAT_PORT=17895 node main.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yiwen-cai/antigravity-side-chat.git"
+  },
+  "keywords": [
+    "antigravity",
+    "antigravity-plugin",
+    "side-chat",
+    "auxiliary-pane",
+    "claude-code-btw",
+    "katex",
+    "gemini-flash"
+  ],
+  "author": "Yiwen Cai <drinklessmilktea@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/yiwen-cai/antigravity-side-chat/issues"
+  },
+  "homepage": "https://github.com/yiwen-cai/antigravity-side-chat#readme"
+}

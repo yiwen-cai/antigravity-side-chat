@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="12" y1="12" x2="116" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4F46E5"/>
+      <stop offset="50%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+    <linearGradient id="sparkleGrad" x1="68" y1="46" x2="94" y2="82" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="50%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </linearGradient>
+    <filter id="badgeShadow" x="4" y="8" width="120" height="120" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.32" flood-color="#1e1b4b"/>
+    </filter>
+    <filter id="boltGlow" x="50" y="30" width="60" height="60" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-opacity="0.4" flood-color="#d97706"/>
+    </filter>
+  </defs>
+
+  <!-- Base Badge Background with ~10% transparent padding (12px on all sides) -->
+  <rect x="12" y="12" width="104" height="104" rx="26" fill="url(#bgGrad)" filter="url(#badgeShadow)"/>
+  
+  <!-- Subtle Inner Border Highlight -->
+  <rect x="12.5" y="12.5" width="103" height="103" rx="25.5" stroke="white" stroke-opacity="0.22" stroke-width="1.5"/>
+
+  <!-- Secondary/Background Chat Bubble (Parallel Context) -->
+  <path d="M34 40 C34 34.477 38.477 30 44 30 H78 C83.523 30 88 34.477 88 40 V54 C88 59.523 83.523 64 78 64 H68 L56 73 V64 H44 C38.477 64 34 59.523 34 54 Z" 
+        fill="#FFFFFF" 
+        fill-opacity="0.25"/>
+
+  <!-- Primary Chat Bubble (Side Chat /btw) -->
+  <path d="M42 48 C42 42.477 46.477 38 52 38 H86 C91.523 38 96 42.477 96 48 V66 C96 71.523 91.523 76 86 76 H76 L62 87 V76 H52 C46.477 76 42 71.523 42 66 Z" 
+        fill="#FFFFFF"/>
+
+  <!-- Chat Lines Inside Primary Bubble -->
+  <rect x="52" y="49" width="22" height="3.5" rx="1.75" fill="#4F46E5"/>
+  <rect x="52" y="56" width="34" height="3.5" rx="1.75" fill="#818CF8"/>
+  <rect x="52" y="63" width="18" height="3.5" rx="1.75" fill="#CBD5E1"/>
+
+  <!-- Lightning / Fast Sparkle Motif (representing /btw quick side execution) -->
+  <path d="M82 46 L70 65 H82 L76 84 L94 62 H81 Z" 
+        fill="url(#sparkleGrad)" 
+        stroke="#FFFFFF" 
+        stroke-width="1.5" 
+        stroke-linejoin="round" 
+        filter="url(#boltGlow)"/>
+</svg>
