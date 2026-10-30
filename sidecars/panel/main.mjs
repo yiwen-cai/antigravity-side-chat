@@ -5,6 +5,15 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 
+// Ensure loopback connections (LS & CDP) never route through system/env HTTP proxies
+process.env.NO_PROXY = '127.0.0.1,localhost,::1';
+process.env.no_proxy = '127.0.0.1,localhost,::1';
+delete process.env.NODE_USE_ENV_PROXY;
+delete process.env.HTTP_PROXY;
+delete process.env.HTTPS_PROXY;
+delete process.env.http_proxy;
+delete process.env.https_proxy;
+
 import { LanguageServerClient } from './ls-client.mjs';
 import { readConversationContext, buildSideChatPrompt } from './context-reader.mjs';
 
@@ -165,6 +174,7 @@ async function handleApiContext(params = {}) {
     ...context,
     models,
     pendingQuote,
+    bridgeHealth: quoteBridge ? quoteBridge.health : null,
   };
 }
 

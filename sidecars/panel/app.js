@@ -229,6 +229,11 @@ function handleIncomingQuote(quote) {
   pushNotePanel.classList.add('hidden');
   pushStatus.classList.add('hidden');
 
+  if (quote.conversationId && quote.conversationId !== 'global' && quote.conversationId !== currentConversationId) {
+    currentConversationId = quote.conversationId;
+    fetchContext();
+  }
+
   activeQuote = {
     id: quote.id || String(ts),
     conversationId: quote.conversationId || currentConversationId,
@@ -273,6 +278,10 @@ window.addEventListener('message', (event) => {
       conversationId: p.conversationId || currentConversationId
     });
   } else if (event.data?.type === 'focus-input') {
+    if (event.data.conversationId && event.data.conversationId !== 'global' && event.data.conversationId !== currentConversationId) {
+      currentConversationId = event.data.conversationId;
+      fetchContext();
+    }
     if (questionInput) {
       questionInput.focus();
       try {

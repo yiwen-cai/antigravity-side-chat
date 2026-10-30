@@ -1,19 +1,29 @@
 /**
  * Host Renderer Text-Selection Quote Bridge for Antigravity Side Chat
  *
- * Connects to the Antigravity 2.0 host renderer via Chrome DevTools Protocol (CDP),
- * detects text selection popups (.selection-quote-popup), injects a native
+ * Connects to the Antigravity 2.x host renderer via Chrome DevTools Protocol (CDP),
+ * detects text selection popups (.selection-quote-popup & .selection-popup) or provides
+ * a fallback floating popup when native popups do not mount, injects a native
  * "Side Chat" action button, and orchestrates:
- * 1. Text selection capture & dismissal
+ * 1. Text selection capture & dismissal (including inline code pills, KaTeX, terminal blocks)
  * 2. Bi-directional delivery via CDP runtime binding (__agSideChatQuoteBindingV1)
- * 3. Aux Pane activation (Direct tab click + React Fiber onSidecarLinkClick fallback)
+ * 3. Aux Pane activation (Direct tab click + React Fiber openAuxTab / autoOpenSidecarLink / onSidecarLinkClick)
  * 4. Multi-stage iframe postMessage dispatch (0ms, 120ms, 300ms, 600ms, 1000ms)
- * 5. Auto-pin and auto-open on app startup
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import http from 'node:http';
+
+// Ensure loopback CDP HTTP & WebSocket connections never route through system HTTP proxies (e.g. Clash)
+process.env.NO_PROXY = '127.0.0.1,localhost,::1';
+process.env.no_proxy = '127.0.0.1,localhost,::1';
+delete process.env.NODE_USE_ENV_PROXY;
+delete process.env.HTTP_PROXY;
+delete process.env.HTTPS_PROXY;
+delete process.env.http_proxy;
+delete process.env.https_proxy;
 
 const BINDING_NAME = '__agSideChatQuoteBindingV1';
 
@@ -26,46 +36,237 @@ const CLIENT_INJECT_SCRIPT = `(() => {
   }
   window.__agSideChatBridgeInstalled = true;
 
-  // 1. Inject persistent stylesheet so .selection-quote-popup fits both Quote and Side Chat buttons
+  const FALLBACK_POPUP_ID = '__ag-sidechat-fallback-popup';
+
+  // 1. Inject persistent stylesheet so native popups fit Side Chat button and inline pills are selectable
   try {
     let styleEl = document.getElementById('__ag-sidechat-quote-style');
     if (!styleEl) {
       styleEl = document.createElement('style');
       styleEl.id = '__ag-sidechat-quote-style';
-      styleEl.textContent = [
-        '.selection-quote-popup {',
-        '  width: auto !important;',
-        '  min-width: 168px !important;',
-        '}'
-      ].join('\\n');
       (document.head || document.documentElement).appendChild(styleEl);
     }
+    styleEl.textContent = [
+      '.selection-quote-popup, .selection-popup {',
+      '  width: auto !important;',
+      '  min-width: 168px !important;',
+      '}',
+      '[data-quotable] .inline-pill, [data-quotable] .inline-pill *, [data-quotable-inline], [data-quotable-inline] * {',
+      '  user-select: text !important;',
+      '  -webkit-user-select: text !important;',
+      '}',
+      '#' + FALLBACK_POPUP_ID + ' {',
+      '  position: fixed !important;',
+      '  z-index: 99999 !important;',
+      '  width: auto !important;',
+      '  min-width: 96px !important;',
+      '  pointer-events: auto !important;',
+      '  user-select: none !important;',
+      '  -webkit-user-select: none !important;',
+      '}'
+    ].join('\\n');
   } catch (err) {
     console.error('[SideChatBridge] Failed to inject popup style:', err);
   }
 
   // 2. Track selection changes to reliably cache user text selection
   let lastCachedSelection = '';
+  let fallbackCheckTimer = null;
+
+  function extractSelectionText(sel) {
+    try {
+      const s = sel || window.getSelection();
+      if (!s || s.rangeCount === 0 || s.isCollapsed) return '';
+      const direct = s.toString().trim();
+      if (direct) return direct;
+      const frag = s.getRangeAt(0).cloneContents();
+      return (frag.textContent || '').trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function isEditableTarget(node) {
+    try {
+      const el = node?.nodeType === 1 ? node : node?.parentElement;
+      if (!el || typeof el.closest !== 'function') return false;
+      return Boolean(
+        el.closest(
+          'input, textarea, [contenteditable="true"], [data-testid="agent-input-box"], [data-testid="new-tab-search-input"], .lexical-editor'
+        )
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function hasNativeSelectionPopup() {
+    try {
+      const popups = document.querySelectorAll('.selection-quote-popup, .selection-popup');
+      for (const p of popups) {
+        if (p.id === FALLBACK_POPUP_ID) continue;
+        if (p.offsetParent !== null || p.getClientRects().length > 0) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function hideFallbackPopup() {
+    try {
+      const el = document.getElementById(FALLBACK_POPUP_ID);
+      if (el) el.remove();
+    } catch (_) {}
+  }
+
+  function showFallbackPopup(rect) {
+    try {
+      if (hasNativeSelectionPopup()) {
+        hideFallbackPopup();
+        return;
+      }
+      let popup = document.getElementById(FALLBACK_POPUP_ID);
+      if (!popup) {
+        popup = document.createElement('div');
+        popup.id = FALLBACK_POPUP_ID;
+        popup.className = 'selection-popup selection-quote-popup shadow rounded-md overflow-visible z-50';
+
+        const inner = document.createElement('div');
+        inner.className = 'flex rounded-md bg-muted text-foreground border border-border shadow-sm overflow-hidden';
+        inner.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }, true);
+        inner.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }, true);
+
+        const btn = createSideChatButtonElement(
+          'flex items-center gap-1 justify-center px-2.5 py-1 transition-colors cursor-pointer hover:bg-secondary text-xs flex-1 min-w-0',
+          false
+        );
+        inner.appendChild(btn);
+        popup.appendChild(inner);
+        (document.body || document.documentElement).appendChild(popup);
+      }
+
+      const popupWidth = 104;
+      const popupHeight = 30;
+      const left = Math.min(
+        Math.max(8, Math.round(rect.right - popupWidth)),
+        Math.max(8, window.innerWidth - popupWidth - 12)
+      );
+      const top = (rect.bottom + popupHeight + 10 < window.innerHeight)
+        ? Math.round(rect.bottom + 6)
+        : Math.max(8, Math.round(rect.top - popupHeight - 6));
+
+      popup.style.left = left + 'px';
+      popup.style.top = top + 'px';
+    } catch (err) {
+      console.error('[SideChatBridge] Failed to show fallback popup:', err);
+    }
+  }
+
+  function scheduleFallbackPopupCheck(delayMs = 35) {
+    if (fallbackCheckTimer) {
+      clearTimeout(fallbackCheckTimer);
+    }
+    fallbackCheckTimer = setTimeout(() => {
+      fallbackCheckTimer = null;
+      try {
+        // First ensure any mounted native popups have the Side Chat button injected
+        injectSideChatButton();
+        if (hasNativeSelectionPopup()) {
+          hideFallbackPopup();
+          return;
+        }
+
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+          hideFallbackPopup();
+          return;
+        }
+
+        if (isEditableTarget(sel.anchorNode) || isEditableTarget(sel.focusNode)) {
+          hideFallbackPopup();
+          return;
+        }
+
+        const text = extractSelectionText(sel);
+        if (!text) {
+          hideFallbackPopup();
+          return;
+        }
+        lastCachedSelection = text;
+
+        const range = sel.getRangeAt(0);
+        const clientRects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0);
+        const rect = clientRects.length > 0 ? clientRects[clientRects.length - 1] : range.getBoundingClientRect();
+        if (!rect || (rect.width === 0 && rect.height === 0)) {
+          hideFallbackPopup();
+          return;
+        }
+
+        showFallbackPopup(rect);
+      } catch (_) {}
+    }, delayMs);
+  }
+
   function updateCachedSelection() {
     try {
       const sel = window.getSelection();
-      const text = sel ? sel.toString().trim() : '';
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+        hideFallbackPopup();
+        return;
+      }
+      const text = extractSelectionText(sel);
       if (text) {
         lastCachedSelection = text;
       }
     } catch (_) {}
   }
-  document.addEventListener('selectionchange', updateCachedSelection, { passive: true });
 
-  // 3. Resolve active conversation ID from DOM or location pathname
+  function handleMouseUpCapture(e) {
+    try {
+      if (e.target && e.target.closest && e.target.closest('#' + FALLBACK_POPUP_ID + ', .selection-popup, .selection-quote-popup')) {
+        return;
+      }
+      scheduleFallbackPopupCheck(35);
+    } catch (_) {}
+  }
+
+  function handleKeyUpCapture(e) {
+    try {
+      if (e.key === 'Escape') {
+        hideFallbackPopup();
+        return;
+      }
+      if (e.shiftKey || e.key.startsWith('Arrow')) {
+        scheduleFallbackPopupCheck(35);
+      }
+    } catch (_) {}
+  }
+
+  function handleScrollCapture() {
+    hideFallbackPopup();
+  }
+
+  document.addEventListener('selectionchange', updateCachedSelection, { passive: true });
+  document.addEventListener('mouseup', handleMouseUpCapture, true);
+  document.addEventListener('keyup', handleKeyUpCapture, true);
+  document.addEventListener('scroll', handleScrollCapture, { capture: true, passive: true });
+
+  // 3. Resolve active conversation ID from location pathname or main conversation view
   function getConversationId() {
     try {
-      const cascadeEl = document.querySelector('[data-cascade-id]');
-      const attrId = cascadeEl ? cascadeEl.getAttribute('data-cascade-id') : null;
-      if (attrId) return attrId;
-
       const match = location.pathname.match(/\\/c\\/([0-9a-f-]{36})/i);
       if (match && match[1]) return match[1];
+
+      const convViewEl = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+      const viewId = convViewEl ? convViewEl.getAttribute('data-cascade-id') : null;
+      if (viewId && viewId !== 'conversation') return viewId;
     } catch (_) {}
     return '';
   }
@@ -120,51 +321,170 @@ const CLIENT_INJECT_SCRIPT = `(() => {
   // Run cleanup once on load to ensure Side Chat is not auto-pinned to top
   try { unpinSideChatIfPinned(); } catch (_) {}
 
-  // Helper: Activate Side Chat (/btw) Tab
-  function activateSideChatTab() {
+  // Helper: Resolve current AuxPane treeId from Yvc Fiber or active conversationId
+  function getAuxPaneTreeId() {
     try {
+      const auxEl = document.querySelector('[data-aux-pane-open]');
+      if (auxEl) {
+        const afk = Object.keys(auxEl).find(k => k.startsWith('__reactFiber'));
+        if (afk) {
+          const aq = [auxEl[afk]];
+          let steps = 0;
+          while (aq.length > 0 && steps < 200) {
+            const n = aq.shift();
+            steps++;
+            if (!n) continue;
+            if (n.memoizedProps && n.memoizedProps.treeId) {
+              return n.memoizedProps.treeId;
+            }
+            if (n.child) aq.push(n.child);
+            if (n.sibling) aq.push(n.sibling);
+          }
+        }
+      }
+    } catch (_) {}
+    const cid = getConversationId();
+    return cid ? { kind: 'cascadeId', cascadeId: cid } : { kind: 'home' };
+  }
+
+  // Helper: Activate Side Chat (/btw) Tab
+  function activateSideChatTab(allowFiberOpen = true) {
+    try {
+      const auxPane = document.querySelector('[data-aux-pane-open]');
+      const isPaneOpen = auxPane && auxPane.getAttribute('data-aux-pane-open') === 'true';
       const activeTabId = document.querySelector('[data-active-tab-id]')?.getAttribute('data-active-tab-id');
-      if (activeTabId === 'sidecar__side-chat/panel__/') {
+
+      if (isPaneOpen && activeTabId === 'sidecar__side-chat/panel__/') {
         return true;
       }
 
-      // Check tab button in tab bar
+      // 1. Check if tab button already exists in the Aux Pane tab bar
       const tabBtn = document.querySelector('[data-tab-id="sidecar__side-chat/panel__/"]')
         || document.querySelector('[data-testid="aux-pane-tab-sidecar__side-chat/panel__/"]')
         || document.querySelector('[data-tab-id*="side-chat"]');
 
       if (tabBtn) {
-        tabBtn.click();
+        if (!isPaneOpen) {
+          const toggleBtn = document.querySelector('[data-testid="toggle-aux-sidebar"]')
+            || document.querySelector('[aria-label="Toggle Auxiliary Pane"]');
+          if (toggleBtn) {
+            try { toggleBtn.click(); } catch (_) {}
+          }
+        }
+        if (activeTabId !== 'sidecar__side-chat/panel__/') {
+          tabBtn.click();
+        }
         return true;
       }
 
-      // Check card button in new tab view
-      const cardBtn = Array.from(document.querySelectorAll('button')).find(
-        b => (b.title && b.title.includes('Side Chat')) || (b.innerText && b.innerText.includes('Side Chat'))
-      );
-      if (cardBtn) {
-        cardBtn.click();
-        return true;
+      if (!allowFiberOpen) {
+        return false;
       }
 
-      // Fallback: React Fiber onSidecarLinkClick with full scheme
+      // 2. React Fiber activation (handles creating the tab + opening Aux Pane + selecting tab)
       const root = document.getElementById('root');
       if (root) {
         const fiberKey = Object.keys(root).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
         if (fiberKey) {
           const queue = [root[fiberKey]];
           let visited = 0;
-          while (queue.length > 0 && visited < 4000) {
+          let openAuxTabFn = null;
+          let autoOpenSidecarFn = null;
+          let sidecarClickFn = null;
+          let resolveSidecarFn = null;
+
+          while (queue.length > 0 && visited < 15000) {
             const node = queue.shift();
             visited++;
             if (!node) continue;
-            if (node.memoizedProps && typeof node.memoizedProps.onSidecarLinkClick === 'function') {
-              node.memoizedProps.onSidecarLinkClick('sidecar://side-chat/panel/');
-              return true;
+
+            // Check props & Context.Provider values for onSidecarLinkClick / autoOpenSidecarLink
+            const p = node.memoizedProps;
+            if (p && typeof p === 'object') {
+              if (typeof p.onSidecarLinkClick === 'function' && !sidecarClickFn) {
+                sidecarClickFn = p.onSidecarLinkClick;
+                resolveSidecarFn = typeof p.resolveSidecarLink === 'function' ? p.resolveSidecarLink : null;
+              }
+              if (p.value && typeof p.value === 'object' && typeof p.value.onSidecarLinkClick === 'function' && !sidecarClickFn) {
+                sidecarClickFn = p.value.onSidecarLinkClick;
+                resolveSidecarFn = typeof p.value.resolveSidecarLink === 'function' ? p.value.resolveSidecarLink : null;
+              }
             }
+
+            // Check hooks for wP (openAuxTab) and P_b (autoOpenSidecarLink)
+            let s = node.memoizedState;
+            while (s) {
+              const ms = s.memoizedState;
+              const fn = Array.isArray(ms) ? ms[0] : ms;
+              if (typeof fn === 'function') {
+                const fnStr = fn.toString();
+                if (!openAuxTabFn && fnStr.includes('OPEN_AUX_PANE_TAB') && fnStr.includes('auxTabInterceptor')) {
+                  openAuxTabFn = fn;
+                }
+                if (!autoOpenSidecarFn && fnStr.includes('d?.forceReload') && fnStr.includes('dashboard')) {
+                  autoOpenSidecarFn = fn;
+                }
+              }
+              s = s.next;
+            }
+
+            if (openAuxTabFn && (autoOpenSidecarFn || sidecarClickFn)) break;
             if (node.child) queue.push(node.child);
             if (node.sibling) queue.push(node.sibling);
           }
+
+          // Priority A: autoOpenSidecarFn('side-chat/panel/', { forceReload: false })
+          if (autoOpenSidecarFn) {
+            try {
+              const ok = autoOpenSidecarFn('side-chat/panel/', { forceReload: false });
+              if (ok) return true;
+            } catch (_) {}
+          }
+
+          // Priority B: openAuxTabFn (wP) with explicit overrideTabId & treeId (works at visited ~44 even on empty conversations!)
+          if (openAuxTabFn) {
+            try {
+              const sidecarHolder = document.querySelector('[data-sidecar-id="side-chat/panel"]');
+              const sidecarUrl = sidecarHolder?.getAttribute('data-sidecar-url') || '';
+              const treeId = getAuxPaneTreeId();
+              openAuxTabFn(
+                {
+                  type: 'sidecarView',
+                  sidecarView: {
+                    sidecarId: 'side-chat/panel',
+                    path: '/',
+                    url: sidecarUrl,
+                    title: 'Side Chat (/btw)'
+                  }
+                },
+                'sidecar__side-chat/panel__/',
+                { treeId, source: 'side_chat_bridge' }
+              );
+              return true;
+            } catch (_) {}
+          }
+
+          // Priority C: sidecarClickFn('side-chat/panel/') (without 'sidecar://' prefix)
+          if (sidecarClickFn) {
+            try {
+              let targetUri = 'side-chat/panel/';
+              if (resolveSidecarFn) {
+                if (resolveSidecarFn('side-chat/panel/')) targetUri = 'side-chat/panel/';
+                else if (resolveSidecarFn('sidecar://side-chat/panel/')) targetUri = 'sidecar://side-chat/panel/';
+              }
+              sidecarClickFn(targetUri);
+              return true;
+            } catch (_) {}
+          }
+        }
+      }
+
+      // 3. Fallback: If Aux Pane is still closed, toggle it open
+      if (!isPaneOpen) {
+        const toggleBtn = document.querySelector('[data-testid="toggle-aux-sidebar"]')
+          || document.querySelector('[aria-label="Toggle Auxiliary Pane"]');
+        if (toggleBtn) {
+          try { toggleBtn.click(); } catch (_) {}
         }
       }
     } catch (err) {
@@ -175,34 +495,28 @@ const CLIENT_INJECT_SCRIPT = `(() => {
 
   // 4. Open and activate Side Chat Aux Pane tab and notify iframe
   function openAndActivateSideChat(quotePayloadOrConvId, quotedText, quoteTimestamp) {
+    const activeConvId = getConversationId();
     let quotePayload = null;
     if (quotePayloadOrConvId && typeof quotePayloadOrConvId === 'object' && quotePayloadOrConvId.quotedText) {
-      quotePayload = quotePayloadOrConvId;
+      quotePayload = {
+        ...quotePayloadOrConvId,
+        conversationId: quotePayloadOrConvId.conversationId || activeConvId
+      };
     } else if (quotedText) {
       quotePayload = {
-        conversationId: (typeof quotePayloadOrConvId === 'string' ? quotePayloadOrConvId : '') || getConversationId(),
+        conversationId: (typeof quotePayloadOrConvId === 'string' && quotePayloadOrConvId ? quotePayloadOrConvId : '') || activeConvId,
         quotedText: quotedText,
         timestamp: quoteTimestamp || Date.now()
       };
     }
 
-    // Open Aux Pane & Activate Side Chat (/btw) Tab (without forcing it to be pinned):
+    // Activate Side Chat (/btw) Tab & Open Aux Pane
     try {
-      const auxPane = document.querySelector('[data-aux-pane-open]');
-      const isClosed = !auxPane || auxPane.getAttribute('data-aux-pane-open') === 'false';
-      if (isClosed) {
-        const toggleBtn = document.querySelector('[data-testid="toggle-aux-sidebar"]')
-          || document.querySelector('[aria-label="Toggle Auxiliary Pane"]');
-        if (toggleBtn) {
-          try { toggleBtn.click(); } catch (_) {}
-        }
-      }
-
-      activateSideChatTab();
-      const delays = [60, 180, 360, 600, 1000];
-      for (const d of delays) {
-        setTimeout(activateSideChatTab, d);
-      }
+      activateSideChatTab(true);
+      setTimeout(() => activateSideChatTab(false), 60);
+      setTimeout(() => activateSideChatTab(true), 180);
+      setTimeout(() => activateSideChatTab(false), 360);
+      setTimeout(() => activateSideChatTab(false), 600);
     } catch (err) {
       console.error('[SideChatBridge] open/activate error:', err);
     }
@@ -210,10 +524,10 @@ const CLIENT_INJECT_SCRIPT = `(() => {
     // Dispatch focus-input at multiple stages
     const focusDelays = [80, 200, 400];
     for (const delay of focusDelays) {
-      setTimeout(broadcastFocusInput, delay);
+      setTimeout(() => broadcastFocusInput(activeConvId), delay);
     }
 
-    // Step C (Deliver quote payload via postMessage to Side Chat iframe(s) when quotePayload is provided):
+    // Deliver quote payload via postMessage to Side Chat iframe(s) when quotePayload is provided
     if (quotePayload) {
       function broadcastQuote() {
         try {
@@ -245,14 +559,15 @@ const CLIENT_INJECT_SCRIPT = `(() => {
   }
 
   // Helper: Broadcast focus-input event to Side Chat iframe(s)
-  function broadcastFocusInput() {
+  function broadcastFocusInput(conversationId) {
     try {
+      const cid = conversationId || getConversationId();
       const iframes = document.querySelectorAll(
         'iframe[src*="side-chat"], iframe[title*="Side Chat"], [data-sidecar-id="side-chat/panel"] iframe, iframe[data-testid="sidecar-iframe"]'
       );
       for (const iframe of iframes) {
         try {
-          iframe.contentWindow?.postMessage({ type: 'focus-input' }, '*');
+          iframe.contentWindow?.postMessage({ type: 'focus-input', conversationId: cid }, '*');
         } catch (_) {}
       }
     } catch (_) {}
@@ -266,10 +581,12 @@ const CLIENT_INJECT_SCRIPT = `(() => {
     e.preventDefault();
     e.stopPropagation();
 
-    const currentSel = window.getSelection()?.toString()?.trim();
+    const currentSel = extractSelectionText(window.getSelection());
     const quotedText = currentSel || lastCachedSelection || '';
     const conversationId = getConversationId();
     const quoteTimestamp = Date.now();
+
+    hideFallbackPopup();
 
     if (quotedText) {
       // Dismiss native selection popup
@@ -307,7 +624,7 @@ const CLIENT_INJECT_SCRIPT = `(() => {
 
     const focusDelays = [80, 200, 400];
     for (const delay of focusDelays) {
-      setTimeout(broadcastFocusInput, delay);
+      setTimeout(() => broadcastFocusInput(conversationId), delay);
     }
   }
 
@@ -317,10 +634,12 @@ const CLIENT_INJECT_SCRIPT = `(() => {
   // 6. Handle Side Chat button click
   function handleSideChatClick() {
     try {
-      const currentSel = window.getSelection()?.toString()?.trim();
+      const currentSel = extractSelectionText(window.getSelection());
       const quotedText = currentSel || lastCachedSelection || '';
       const conversationId = getConversationId();
       const quoteTimestamp = Date.now();
+
+      hideFallbackPopup();
 
       // Dismiss native selection popup
       try {
@@ -358,49 +677,67 @@ const CLIENT_INJECT_SCRIPT = `(() => {
     }
   }
 
-  // 7. Inject button into native quote popup
+  function createSideChatButtonElement(className, withLeftBorder = true) {
+    const sideChatBtn = document.createElement('button');
+    sideChatBtn.type = 'button';
+    sideChatBtn.setAttribute('data-testid', 'selection-sidechat-button');
+    sideChatBtn.className = className || 'flex items-center gap-1 justify-center px-2 py-1 transition-colors cursor-pointer hover:bg-secondary text-xs flex-1 min-w-0';
+    if (withLeftBorder) {
+      sideChatBtn.style.borderLeft = '1px solid var(--border, rgba(128, 128, 128, 0.25))';
+    }
+    sideChatBtn.style.whiteSpace = 'nowrap';
+    sideChatBtn.innerHTML = [
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-none opacity-80" style="display:inline-block;vertical-align:middle;margin-right:3px;">',
+      '  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>',
+      '</svg>',
+      '<span class="text-xs font-medium">Side Chat</span>'
+    ].join('');
+
+    // Prevent selection loss when clicking inside the popup
+    sideChatBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    sideChatBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    sideChatBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSideChatClick();
+    });
+
+    return sideChatBtn;
+  }
+
+  // 7. Inject button into native quote popups (.selection-quote-popup AND .selection-popup)
   function injectSideChatButton() {
     try {
-      const popups = document.querySelectorAll('.selection-quote-popup');
+      const popups = document.querySelectorAll('.selection-quote-popup, .selection-popup');
+      let foundNative = false;
       for (const popup of popups) {
-        const quoteBtn = popup.querySelector('[data-testid="selection-quote-button"]');
-        if (!quoteBtn) continue;
+        if (popup.id === FALLBACK_POPUP_ID) continue;
+        foundNative = true;
+
         if (popup.querySelector('[data-testid="selection-sidechat-button"]')) continue;
+
+        const refBtn = popup.querySelector(
+          '[data-testid="selection-quote-button"], [data-testid="selection-popup-quote-button"], [data-testid="selection-comment-button"]'
+        );
+        if (!refBtn || !refBtn.parentNode) continue;
 
         // Ensure popup container width is auto and min-width is 168px
         popup.style.setProperty('width', 'auto', 'important');
         popup.style.setProperty('min-width', '168px', 'important');
 
-        const sideChatBtn = document.createElement('button');
-        sideChatBtn.type = 'button';
-        sideChatBtn.setAttribute('data-testid', 'selection-sidechat-button');
-        sideChatBtn.className = quoteBtn.className || 'flex items-center gap-1 justify-center px-2 py-1 transition-colors cursor-pointer hover:bg-secondary text-xs flex-1 min-w-0';
-        sideChatBtn.style.borderLeft = '1px solid var(--border, rgba(128, 128, 128, 0.25))';
-        sideChatBtn.style.whiteSpace = 'nowrap';
-        sideChatBtn.innerHTML = [
-          '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-none opacity-80" style="display:inline-block;vertical-align:middle;margin-right:3px;">',
-          '  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>',
-          '</svg>',
-          '<span class="text-xs font-medium">Side Chat</span>'
-        ].join('');
+        const sideChatBtn = createSideChatButtonElement(refBtn.className, true);
+        refBtn.parentNode.appendChild(sideChatBtn);
+      }
 
-        // Prevent selection loss when clicking inside the popup
-        sideChatBtn.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        });
-        sideChatBtn.addEventListener('pointerdown', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        });
-
-        sideChatBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          handleSideChatClick();
-        });
-
-        quoteBtn.parentNode.insertBefore(sideChatBtn, quoteBtn.nextSibling);
+      if (foundNative) {
+        hideFallbackPopup();
       }
     } catch (err) {
       console.error('[SideChatBridge] Error injecting sidechat button:', err);
@@ -426,12 +763,16 @@ const CLIENT_INJECT_SCRIPT = `(() => {
   // Teardown / uninstall function
   window.__agSideChatBridgeUninstall = () => {
     try {
-      if (typeof autoOpenTimer !== 'undefined' && autoOpenTimer) {
-        clearInterval(autoOpenTimer);
-        autoOpenTimer = null;
+      if (fallbackCheckTimer) {
+        clearTimeout(fallbackCheckTimer);
+        fallbackCheckTimer = null;
       }
+      hideFallbackPopup();
       observer.disconnect();
       document.removeEventListener('selectionchange', updateCachedSelection);
+      document.removeEventListener('mouseup', handleMouseUpCapture, true);
+      document.removeEventListener('keyup', handleKeyUpCapture, true);
+      document.removeEventListener('scroll', handleScrollCapture, true);
       document.removeEventListener('keydown', handleGlobalKeydown, true);
       const styleEl = document.getElementById('__ag-sidechat-quote-style');
       if (styleEl) styleEl.remove();
@@ -447,6 +788,9 @@ const CLIENT_INJECT_SCRIPT = `(() => {
  * Resolves the platform-specific DevToolsActivePort file path.
  */
 function getDevToolsActivePortPath() {
+  if (process.env.AGY_BROWSER_ACTIVE_PORT_FILE && fs.existsSync(process.env.AGY_BROWSER_ACTIVE_PORT_FILE)) {
+    return process.env.AGY_BROWSER_ACTIVE_PORT_FILE;
+  }
   const platform = process.platform;
   const home = os.homedir();
   if (platform === 'darwin') {
@@ -472,6 +816,45 @@ function isLoopback(urlStr) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Direct loopback HTTP GET bypassing any global fetch/undici env proxy.
+ */
+function httpGetJson(port, urlPath, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: urlPath,
+        agent: false,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          return reject(new Error(`DevTools HTTP status ${res.statusCode}`));
+        }
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error('DevTools HTTP request timed out'));
+    });
+    req.on('error', reject);
+  });
 }
 
 /**
@@ -800,22 +1183,17 @@ export class QuoteBridge {
 
       this._activePort = port;
 
-      // Fetch active targets from DevTools HTTP endpoint
-      const listUrl = `http://127.0.0.1:${port}/json/list`;
-      const res = await fetch(listUrl, { signal: AbortSignal.timeout(2000) });
-      if (!res.ok) {
-        throw new Error(`DevTools HTTP endpoint returned status ${res.status}`);
-      }
-
-      const targets = await res.json();
+      // Fetch active targets from DevTools HTTP endpoint via direct loopback socket
+      const targets = await httpGetJson(port, '/json/list', 2000);
       if (!Array.isArray(targets)) {
         throw new Error('DevTools returned non-array targets response');
       }
 
-      // Filter for target.type === 'page' where target.url and target.webSocketDebuggerUrl are on loopback
+      // Filter for target.type === 'page' where target.webSocketDebuggerUrl is on loopback
       const validTargets = targets.filter(t => {
         if (t.type !== 'page' || !t.webSocketDebuggerUrl) return false;
-        return isLoopback(t.webSocketDebuggerUrl) && isLoopback(t.url);
+        if (t.url && (t.url.startsWith('devtools://') || t.url.startsWith('chrome-extension://'))) return false;
+        return isLoopback(t.webSocketDebuggerUrl);
       });
 
       const validTargetIds = new Set(validTargets.map(t => t.id));
